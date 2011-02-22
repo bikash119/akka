@@ -200,7 +200,7 @@ class PipelineTest extends WordSpec with ShouldMatchers with BeforeAndAfterAll w
     def interceptedMessages: Seq[RemoteMessageProtocol] = messages
 
     def filter: Pipeline.Filter = {
-      case Some(protocol: RemoteMessageProtocol) if protocol.getActorInfo.getId.equals(id) => {
+      case Some(protocol: RemoteMessageProtocol) => {
         messages.append(protocol)
         Some(protocol)
       }
