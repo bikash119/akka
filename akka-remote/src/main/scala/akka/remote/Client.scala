@@ -1,3 +1,7 @@
+/**
+ * Copyright (C) 2009-2011 Scalable Solutions AB <http://scalablesolutions.se>
+ */
+
 package akka.remote
 
 import akka.dispatch.CompletableFuture
@@ -35,9 +39,9 @@ trait Client {
                  request: RemoteMessageProtocol,
                  senderFuture: Option[CompletableFuture[T]]): Option[CompletableFuture[T]]
 
-  protected [akka] def registerFilters(sendFilter: Pipeline.Filter, receiveFilter:Pipeline.Filter): Unit
+  protected[akka] def registerFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter): Unit
 
-  protected [akka] def unregisterFilters(): Unit
+  protected[akka] def unregisterFilters(): Unit
 
   protected def notifyListeners(msg: => Any);
 
@@ -50,11 +54,11 @@ trait DefaultClient extends Logging with Client {
   protected val remoteAddress: InetSocketAddress
   protected val module: RemoteClientModule
   protected val loader: Option[ClassLoader]
-  protected val fallback: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = {
+  protected val fallback: Pipeline.Filter = {
     case m => m
   }
-  protected var sendFilter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
-  protected var receiveFilter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
+  protected var sendFilter: Pipeline.Filter = fallback
+  protected var receiveFilter: Pipeline.Filter = fallback
 
   val name = this.getClass.getSimpleName + "@" + remoteAddress.getHostName + "::" + remoteAddress.getPort
 
@@ -70,7 +74,7 @@ trait DefaultClient extends Logging with Client {
 
   protected def currentChannel: Channel
 
-  def registerFilters(sendFilter: Pipeline.Filter,receiveFilter: Pipeline.Filter): Unit = {
+  def registerFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter): Unit = {
     this.sendFilter = (sendFilter orElse fallback)
     this.receiveFilter = (receiveFilter orElse fallback)
   }
@@ -249,11 +253,13 @@ trait DefaultRemoteClientModule extends RemoteClientModule with ClientFilters {
               remoteClients.get(key) match {
               //Recheck for addition, race between upgrades
                 case Some(client) => client //If already populated by other writer
-                case None => //Populate map
+                case None => {
+                  //Populate map
                   val client = createClient(address, loader)
                   client.connect()
                   remoteClients += key -> client
                   client
+                }
               }
             } finally {
               lock.readLock.lock
