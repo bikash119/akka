@@ -2,14 +2,14 @@ package akka.remote
 
 import akka.dispatch.CompletableFuture
 import java.net.InetSocketAddress
-import protocol.RemoteProtocol.RemoteMessageProtocol
+import akka.remote.protocol.RemoteProtocol.RemoteMessageProtocol
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import org.jboss.netty.channel.Channel
 import akka.remoteinterface._
 import scala.collection.mutable.HashMap
 import akka.util._
-import akka.actor.{TypedActor, Index, newUuid, Uuid, IllegalActorStateException, ActorRef, ActorType => AkkaActorType, RemoteActorRef}
+import akka.actor.{TypedActor, Index, newUuid, Uuid, uuidFrom, Exit, IllegalActorStateException, ActorRef, ActorType => AkkaActorType, RemoteActorRef}
 import akka.serialization.RemoteActorSerialization
 
 trait Client {
@@ -35,6 +35,10 @@ trait Client {
                  request: RemoteMessageProtocol,
                  senderFuture: Option[CompletableFuture[T]]): Option[CompletableFuture[T]]
 
+  protected [akka] def registerFilters(sendFilter: Pipeline.Filter, receiveFilter:Pipeline.Filter): Unit
+
+  protected [akka] def unregisterFilters(): Unit
+
   protected def notifyListeners(msg: => Any);
 
   protected[akka] def registerSupervisorForActor(actorRef: ActorRef): ActorRef
@@ -42,11 +46,15 @@ trait Client {
   protected[akka] def deregisterSupervisorForActor(actorRef: ActorRef): ActorRef
 }
 
-trait AbstractClient extends Logging with Client {
+trait DefaultClient extends Logging with Client {
   protected val remoteAddress: InetSocketAddress
   protected val module: RemoteClientModule
-  private val fallback: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = {case Some(msg:RemoteMessageProtocol) => Some(msg) case _ => None}
-  private var filter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
+  protected val loader: Option[ClassLoader]
+  protected val fallback: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = {
+    case m => m
+  }
+  protected var sendFilter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
+  protected var receiveFilter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
 
   val name = this.getClass.getSimpleName + "@" + remoteAddress.getHostName + "::" + remoteAddress.getPort
 
@@ -61,6 +69,16 @@ trait AbstractClient extends Logging with Client {
   Unit
 
   protected def currentChannel: Channel
+
+  def registerFilters(sendFilter: Pipeline.Filter,receiveFilter: Pipeline.Filter): Unit = {
+    this.sendFilter = (sendFilter orElse fallback)
+    this.receiveFilter = (receiveFilter orElse fallback)
+  }
+
+  def unregisterFilters: Unit = {
+    this.sendFilter = fallback
+    this.receiveFilter = fallback
+  }
 
   def connect(reconnectIfAlreadyConnected: Boolean = false): Boolean
 
@@ -80,7 +98,7 @@ trait AbstractClient extends Logging with Client {
                  typedActorInfo: Option[Tuple2[String, String]],
                  actorType: AkkaActorType): Option[CompletableFuture[T]] = synchronized {
     //TODO: find better strategy to prevent race
-    val remoteProtocolMessage  = RemoteActorSerialization.createRemoteMessageProtocolBuilder(
+    val remoteProtocolMessage = RemoteActorSerialization.createRemoteMessageProtocolBuilder(
       Some(actorRef),
       Left(actorRef.uuid),
       actorRef.id,
@@ -94,7 +112,61 @@ trait AbstractClient extends Logging with Client {
       if (isAuthenticated.compareAndSet(false, true)) RemoteClientSettings.SECURE_COOKIE else None
     ).build
 
-    (filter orElse fallback) (Some(remoteProtocolMessage)) flatMap (send(_, senderFuture))
+    (sendFilter orElse fallback)(Some(remoteProtocolMessage)) flatMap (send(_, senderFuture))
+  }
+
+  def receiveMessage(message: AnyRef): Unit = {
+    message match {
+
+      case reply: RemoteMessageProtocol =>
+        val replyUuid = uuidFrom(reply.getActorInfo.getUuid.getHigh, reply.getActorInfo.getUuid.getLow)
+        log.slf4j.debug("Remote client received RemoteMessageProtocol[\n{}]", reply)
+        log.slf4j.debug("Trying to map back to future: {}", replyUuid)
+        val future = futures.remove(replyUuid).asInstanceOf[CompletableFuture[Any]]
+        (receiveFilter orElse fallback)(Some(reply)) map {
+          filteredReply =>
+
+            if (filteredReply.hasMessage) {
+              if (future eq null) throw new IllegalActorStateException("Future mapped to UUID " + replyUuid + " does not exist")
+              val message = MessageSerializer.deserialize(filteredReply.getMessage)
+              future.completeWithResult(message)
+            } else {
+              val exception = parseException(filteredReply, loader)
+
+              if (filteredReply.hasSupervisorUuid()) {
+                val supervisorUuid = uuidFrom(filteredReply.getSupervisorUuid.getHigh, filteredReply.getSupervisorUuid.getLow)
+                if (!supervisors.containsKey(supervisorUuid)) throw new IllegalActorStateException(
+                  "Expected a registered supervisor for UUID [" + supervisorUuid + "] but none was found")
+                val supervisedActor = supervisors.get(supervisorUuid)
+                if (!supervisedActor.supervisor.isDefined) throw new IllegalActorStateException(
+                  "Can't handle restart for remote actor " + supervisedActor + " since its supervisor has been removed")
+                else supervisedActor.supervisor.get ! Exit(supervisedActor, exception)
+              }
+
+              future.completeWithException(exception)
+            }
+        }
+      case other =>
+        throw new RemoteClientException("Unknown message received in remote client handler: " + other, module, remoteAddress)
+    }
+
+  }
+
+  private def parseException(reply: RemoteMessageProtocol, loader: Option[ClassLoader]): Throwable = {
+    val exception = reply.getException
+    val classname = exception.getClassname
+    try {
+      val exceptionClass = if (loader.isDefined) loader.get.loadClass(classname)
+      else Class.forName(classname)
+      exceptionClass
+          .getConstructor(Array[Class[_]](classOf[String]): _*)
+          .newInstance(exception.getMessage).asInstanceOf[Throwable]
+    } catch {
+      case problem =>
+        log.debug("Couldn't parse exception returned from RemoteServer", problem)
+        log.warn("Couldn't create instance of {} with message {}, returning UnparsableException", classname, exception.getMessage)
+        UnparsableException(classname, exception.getMessage)
+    }
   }
 
   /**
@@ -104,8 +176,8 @@ trait AbstractClient extends Logging with Client {
 
   def writeTwoWay[T](senderFuture: Option[CompletableFuture[T]], request: RemoteMessageProtocol): Some[CompletableFuture[T]]
 
-  def send[T](   request: RemoteMessageProtocol,
-                 senderFuture: Option[CompletableFuture[T]]): Option[CompletableFuture[T]] = {
+  def send[T](request: RemoteMessageProtocol,
+              senderFuture: Option[CompletableFuture[T]]): Option[CompletableFuture[T]] = {
     log.slf4j.debug("sending message: {} has future {}", request, senderFuture)
     if (isRunning) {
       if (request.getOneWay) {
@@ -132,7 +204,13 @@ trait AbstractClient extends Logging with Client {
     else supervisors.remove(actorRef.supervisor.get.uuid)
 }
 
-trait DefaultRemoteClientModule extends RemoteClientModule {
+trait ClientFilters {
+  private[akka] def registerClientFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter, address: Address, loader: Option[ClassLoader] = None)
+
+  private[akka] def unregisterClientFilters(address: Address, loader: Option[ClassLoader] = None)
+}
+
+trait DefaultRemoteClientModule extends RemoteClientModule with ClientFilters {
   self: ListenerManagement with Logging =>
   private val remoteClients = new HashMap[Address, Client]
   private val remoteActors = new Index[Address, Uuid]
@@ -151,7 +229,7 @@ trait DefaultRemoteClientModule extends RemoteClientModule {
                               typedActorInfo: Option[Tuple2[String, String]],
                               actorType: AkkaActorType,
                               loader: Option[ClassLoader]): Option[CompletableFuture[T]] =
-    withClientFor(remoteAddress, loader) (_.send[T](message, senderOption, senderFuture, remoteAddress, timeout, isOneWay, actorRef, typedActorInfo, actorType))
+    withClientFor(remoteAddress, loader)(_.send[T](message, senderOption, senderFuture, remoteAddress, timeout, isOneWay, actorRef, typedActorInfo, actorType))
 
   protected[akka] def createClient(address: InetSocketAddress, loader: Option[ClassLoader]): Client
 
@@ -237,5 +315,13 @@ trait DefaultRemoteClientModule extends RemoteClientModule {
   private[akka] def unregisterClientManagedActor(hostname: String, port: Int, uuid: Uuid) = {
     remoteActors.remove(Address(hostname, port), uuid)
     //TODO: should the connection be closed when the last actor deregisters?
+  }
+
+  private[akka] def registerClientFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter, remoteAddress: Address, loader: Option[ClassLoader] = None): Unit = {
+    withClientFor(new InetSocketAddress(remoteAddress.hostname, remoteAddress.port), loader)(_.registerFilters(sendFilter, receiveFilter))
+  }
+
+  private[akka] def unregisterClientFilters(remoteAddress: Address, loader: Option[ClassLoader] = None): Unit = {
+    withClientFor(new InetSocketAddress(remoteAddress.hostname, remoteAddress.port), loader)(_.unregisterFilters())
   }
 }

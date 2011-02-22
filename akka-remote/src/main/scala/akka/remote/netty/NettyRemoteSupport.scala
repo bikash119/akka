@@ -51,7 +51,7 @@ trait NettyRemoteClientModule extends DefaultRemoteClientModule {
  */
 abstract class RemoteClient private[akka](
                                              module: RemoteClientModule,
-                                             remoteAddress: InetSocketAddress) extends AbstractClient {
+                                             remoteAddress: InetSocketAddress) extends DefaultClient {
 
   def writeOneWay[T](request: RemoteMessageProtocol): Unit = {
     currentChannel.write(request).addListener(new ChannelFutureListener {
@@ -92,7 +92,8 @@ abstract class RemoteClient private[akka](
  */
 class ActiveRemoteClient private[akka](
                                           val module: NettyRemoteClientModule, val remoteAddress: InetSocketAddress,
-                                          val loader: Option[ClassLoader] = None, notifyListenersFun: (=> Any) => Unit) extends RemoteClient(module, remoteAddress) {
+                                          val loader: Option[ClassLoader] = None, notifyListenersFun: (=> Any) => Unit
+                                          ) extends RemoteClient(module, remoteAddress) {
 
   import RemoteClientSettings._
 
@@ -256,36 +257,7 @@ class ActiveRemoteClientHandler(
 
   override def messageReceived(ctx: ChannelHandlerContext, event: MessageEvent) {
     try {
-      event.getMessage match {
-        case reply: RemoteMessageProtocol =>
-          val replyUuid = uuidFrom(reply.getActorInfo.getUuid.getHigh, reply.getActorInfo.getUuid.getLow)
-          log.slf4j.debug("Remote client received RemoteMessageProtocol[\n{}]", reply)
-          log.slf4j.debug("Trying to map back to future: {}", replyUuid)
-          val future = futures.remove(replyUuid).asInstanceOf[CompletableFuture[Any]]
-
-          if (reply.hasMessage) {
-            if (future eq null) throw new IllegalActorStateException("Future mapped to UUID " + replyUuid + " does not exist")
-            val message = MessageSerializer.deserialize(reply.getMessage)
-            future.completeWithResult(message)
-          } else {
-            val exception = parseException(reply, client.loader)
-
-            if (reply.hasSupervisorUuid()) {
-              val supervisorUuid = uuidFrom(reply.getSupervisorUuid.getHigh, reply.getSupervisorUuid.getLow)
-              if (!supervisors.containsKey(supervisorUuid)) throw new IllegalActorStateException(
-                "Expected a registered supervisor for UUID [" + supervisorUuid + "] but none was found")
-              val supervisedActor = supervisors.get(supervisorUuid)
-              if (!supervisedActor.supervisor.isDefined) throw new IllegalActorStateException(
-                "Can't handle restart for remote actor " + supervisedActor + " since its supervisor has been removed")
-              else supervisedActor.supervisor.get ! Exit(supervisedActor, exception)
-            }
-
-            future.completeWithException(exception)
-          }
-
-        case other =>
-          throw new RemoteClientException("Unknown message received in remote client handler: " + other, client.module, client.remoteAddress)
-      }
+      client.receiveMessage(event.getMessage)
     } catch {
       case e: Exception =>
         client.notifyListeners(RemoteClientError(e, client.module, client.remoteAddress))
@@ -341,23 +313,6 @@ class ActiveRemoteClientHandler(
 
     event.getChannel.close
   }
-
-  private def parseException(reply: RemoteMessageProtocol, loader: Option[ClassLoader]): Throwable = {
-    val exception = reply.getException
-    val classname = exception.getClassname
-    try {
-      val exceptionClass = if (loader.isDefined) loader.get.loadClass(classname)
-      else Class.forName(classname)
-      exceptionClass
-          .getConstructor(Array[Class[_]](classOf[String]): _*)
-          .newInstance(exception.getMessage).asInstanceOf[Throwable]
-    } catch {
-      case problem =>
-        log.debug("Couldn't parse exception returned from RemoteServer", problem)
-        log.warn("Couldn't create instance of {} with message {}, returning UnparsableException", classname, exception.getMessage)
-        UnparsableException(classname, exception.getMessage)
-    }
-  }
 }
 
 /**
@@ -407,8 +362,8 @@ class NettyRemoteServer(serverModule: RemoteServerModule, val host: String, val 
 
   // group of open channels, used for clean-up
   private val openChannels: ChannelGroup = new DefaultDisposableChannelGroup("akka-remote-server")
-
-  val pipelineFactory = new RemoteServerPipelineFactory(name, openChannels, loader, serverModule)
+  val remoteServer = new RemoteServerHandler(name, openChannels, loader, serverModule)
+  val pipelineFactory = new RemoteServerPipelineFactory(name, openChannels, loader, serverModule, remoteServer)
   bootstrap.setPipelineFactory(pipelineFactory)
   bootstrap.setOption("backlog", RemoteServerSettings.BACKLOG)
   bootstrap.setOption("child.tcpNoDelay", true)
@@ -430,9 +385,16 @@ class NettyRemoteServer(serverModule: RemoteServerModule, val host: String, val 
       case e => serverModule.log.slf4j.warn("Could not close remote server channel in a graceful way")
     }
   }
+  protected [akka] def registerServerFilters(sendFilter: Pipeline.Filter, receiveFilter:Pipeline.Filter) = {
+    remoteServer.registerFilters(sendFilter, receiveFilter)
+
+  }
+  protected [akka] def unregisterServerFilters = {
+    remoteServer.unregisterFilters
+  }
 }
 
-trait NettyRemoteServerModule extends AbstractRemoteServerModule {
+trait NettyRemoteServerModule extends DefaultRemoteServerModule {
   def createRemoteServer(remoteServerModule: RemoteServerModule, hostname: String, port: Int, loader: Option[ClassLoader]): RemoteServer = {
     new NettyRemoteServer(remoteServerModule, hostname, port, loader)
   }
@@ -461,7 +423,8 @@ class RemoteServerPipelineFactory(
                                      val name: String,
                                      val openChannels: ChannelGroup,
                                      val loader: Option[ClassLoader],
-                                     val server: RemoteServerModule) extends ChannelPipelineFactory {
+                                     val server: RemoteServerModule,
+                                     val remoteServerHandler: RemoteServerHandler) extends ChannelPipelineFactory {
 
   import RemoteServerSettings._
 
@@ -484,9 +447,7 @@ class RemoteServerPipelineFactory(
       case "zlib" => (join(new ZlibEncoder(ZLIB_COMPRESSION_LEVEL)), join(new ZlibDecoder))
       case _ => (join(), join())
     }
-
-    val remoteServer = new RemoteServerHandler(name, openChannels, loader, server)
-    val stages = ssl ++ dec ++ join(lenDec, protobufDec) ++ enc ++ join(lenPrep, protobufEnc, remoteServer)
+    val stages = ssl ++ dec ++ join(lenDec, protobufDec) ++ enc ++ join(lenPrep, protobufEnc, remoteServerHandler)
     new StaticChannelPipeline(stages: _*)
   }
 }
@@ -518,7 +479,7 @@ class RemoteServerHandler(
                              val name: String,
                              val openChannels: ChannelGroup,
                              val applicationLoader: Option[ClassLoader],
-                             val server: RemoteServerModule) extends SimpleChannelUpstreamHandler with Logging with RemoteServerMessages[Channel] {
+                             val server: RemoteServerModule) extends SimpleChannelUpstreamHandler with Logging with RemoteMessageProtocolHandler[Channel] {
 
   import RemoteServerSettings._
 

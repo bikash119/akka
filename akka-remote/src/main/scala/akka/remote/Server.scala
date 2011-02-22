@@ -12,7 +12,7 @@ import akka.remote.protocol.RemoteProtocol._
 import akka.remote.protocol.RemoteProtocol.ActorType._
 import akka.remoteinterface.{RemoteSupport, RemoteModule, RemoteServerModule, RemoteServerError}
 
-trait RemoteServer {
+trait RemoteServer extends ServerFilters {
   def name: String
 
   def host: String
@@ -24,7 +24,13 @@ trait RemoteServer {
   def shutdown
 }
 
-trait AbstractRemoteServerModule extends RemoteServerModule {
+trait ServerFilters {
+  protected[akka] def registerServerFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter)
+
+  protected[akka] def unregisterServerFilters
+}
+
+trait DefaultRemoteServerModule extends RemoteServerModule with ServerFilters {
   self: RemoteModule =>
 
   import RemoteServerSettings._
@@ -204,6 +210,24 @@ trait AbstractRemoteServerModule extends RemoteServerModule {
    */
   def unregisterTypedPerSessionActor(id: String): Unit =
     if (_isRunning.isOn) typedActorsFactories.remove(id)
+
+  protected[akka] def registerServerFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter) = {
+    if (_isRunning.isOn) {
+      currentServer.get.map {
+        server =>
+          server.registerServerFilters(sendFilter, receiveFilter);
+      }
+    }
+  }
+
+  protected[akka] def unregisterServerFilters = {
+    if (_isRunning.isOn) {
+      currentServer.get.map {
+        server =>
+          server.unregisterServerFilters
+      }
+    }
+  }
 }
 
 trait Session[T <: Comparable[T]] {
@@ -212,10 +236,16 @@ trait Session[T <: Comparable[T]] {
   def channel: T
 }
 
-// handles remote Message protocol and dispatches to Actors
-trait RemoteServerMessages[T <: Comparable[T]] extends Logging {
+// handles remote Message protocol and dispatches to Actors, T is the Channel type key for sessions
+trait RemoteMessageProtocolHandler[T <: Comparable[T]] extends Logging {
 
   import RemoteServerSettings._
+
+  val fallback: Pipeline.Filter = {
+    case msg => msg
+  }
+  protected var sendFilter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
+  protected var receiveFilter: PartialFunction[Option[RemoteMessageProtocol], Option[RemoteMessageProtocol]] = fallback
 
   val applicationLoader: Option[ClassLoader]
   val server: RemoteServerModule
@@ -229,20 +259,24 @@ trait RemoteServerMessages[T <: Comparable[T]] extends Logging {
   def getSessionActors(channel: T): ConcurrentHashMap[String, ActorRef]
 
   applicationLoader.foreach(MessageSerializer.setClassLoader(_))
+
   //TODO: REVISIT: THIS FEELS A BIT DODGY
 
 
-  private [akka] def handleRemoteMessageProtocol(request: RemoteMessageProtocol, session: Session[T]) = {
+  private[akka] def handleRemoteMessageProtocol(request: RemoteMessageProtocol, session: Session[T]) = {
     log.slf4j.debug("Received RemoteMessageProtocol[\n{}]", request)
-    request.getActorInfo.getActorType match {
-      case SCALA_ACTOR => dispatchToActor(request, session)
-      case TYPED_ACTOR => dispatchToTypedActor(request, session)
-      case JAVA_ACTOR => throw new IllegalActorStateException("ActorType JAVA_ACTOR is currently not supported")
-      case other => throw new IllegalActorStateException("Unknown ActorType [" + other + "]")
+    (receiveFilter orElse fallback)(Some(request)) map {
+      filteredRequest =>
+        filteredRequest.getActorInfo.getActorType match {
+          case SCALA_ACTOR => dispatchToActor(filteredRequest, session)
+          case TYPED_ACTOR => dispatchToTypedActor(filteredRequest, session)
+          case JAVA_ACTOR => throw new IllegalActorStateException("ActorType JAVA_ACTOR is currently not supported")
+          case other => throw new IllegalActorStateException("Unknown ActorType [" + other + "]")
+        }
     }
   }
 
-  private [akka] def dispatchToActor(request: RemoteMessageProtocol, session: Session[T]) {
+  private[akka] def dispatchToActor(request: RemoteMessageProtocol, session: Session[T]) {
     val actorInfo = request.getActorInfo
     log.slf4j.debug("Dispatching to remote actor [{}:{}]", actorInfo.getTarget, actorInfo.getUuid)
 
@@ -286,6 +320,7 @@ trait RemoteServerMessages[T <: Comparable[T]] extends Logging {
               session.write(createErrorReplyMessage(exception.get, request, AkkaActorType.ScalaActor))
             }
             else if (result.isDefined) {
+
               log.slf4j.debug("Returning result from actor invocation [{}]", result.get)
               val messageBuilder = RemoteActorSerialization.createRemoteMessageProtocolBuilder(
                 Some(actorRef),
@@ -302,8 +337,8 @@ trait RemoteServerMessages[T <: Comparable[T]] extends Logging {
 
               // FIXME lift in the supervisor uuid management into toh createRemoteMessageProtocolBuilder method
               if (request.hasSupervisorUuid) messageBuilder.setSupervisorUuid(request.getSupervisorUuid)
-
-              session.write(messageBuilder.build)
+              val protocol = messageBuilder.build
+              (sendFilter orElse fallback)(Some(protocol)) map { session.write(_) }
             }
           }
           )
@@ -311,7 +346,7 @@ trait RemoteServerMessages[T <: Comparable[T]] extends Logging {
     }
   }
 
-  private [akka] def dispatchToTypedActor(request: RemoteMessageProtocol, session: Session[T]) = {
+  private[akka] def dispatchToTypedActor(request: RemoteMessageProtocol, session: Session[T]) = {
     val actorInfo = request.getActorInfo
     val typedActorInfo = actorInfo.getTypedActorInfo
     log.slf4j.debug("Dispatching to remote typed actor [{} :: {}]", typedActorInfo.getMethod, typedActorInfo.getInterface)
@@ -520,4 +555,14 @@ trait RemoteServerMessages[T <: Comparable[T]] extends Logging {
   }
 
   private[akka] def parseUuid(protocol: UuidProtocol): Uuid = uuidFrom(protocol.getHigh, protocol.getLow)
+
+  protected[akka] def registerFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter): Unit = {
+    this.sendFilter = sendFilter
+    this.receiveFilter = receiveFilter
+  }
+
+  protected[akka] def unregisterFilters(): Unit = {
+    sendFilter = fallback
+    receiveFilter = fallback
+  }
 }
