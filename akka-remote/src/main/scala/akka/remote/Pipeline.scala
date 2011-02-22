@@ -1,3 +1,7 @@
+/**
+ * Copyright (C) 2009-2010 Scalable Solutions AB <http://scalablesolutions.se>
+ */
+
 package akka.remote
 
 import protocol.RemoteProtocol.RemoteMessageProtocol
@@ -10,7 +14,7 @@ object Pipeline {
   def identity:Filter = {case m => m}
 
   def registerClientFilters(remoteAddress: Address, sendFilter: Filter, receiveFilter:Filter=identity, remoteSupport: RemoteSupport = Actor.remote): Unit = {
-    // it is this, or move protobuf RemoteProtocol classes to akka-actor
+    // it is asInstanceOf, or move protobuf RemoteProtocol classes to akka-actor
     val clientFilters = remoteSupport.asInstanceOf[ClientFilters]
     clientFilters.registerClientFilters(sendFilter,receiveFilter, remoteAddress)
   }
@@ -20,7 +24,6 @@ object Pipeline {
   }
 
   def registerServerFilters(address: Address, sendFilter: Filter, receiveFilter:Filter=identity, remoteSupport: RemoteSupport = Actor.remote): Unit = {
-    // it is this, or move protobuf RemoteProtocol classes to akka-actor
     val serverFilters = remoteSupport.asInstanceOf[ServerFilters]
     serverFilters.registerServerFilters(sendFilter,receiveFilter)
   }
