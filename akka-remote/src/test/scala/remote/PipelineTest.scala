@@ -14,7 +14,9 @@ import java.lang.String
 import akka.remote.netty.NettyRemoteSupport
 import org.scalatest.{BeforeAndAfterAll, WordSpec}
 import akka.remote.protocol.RemoteProtocol.RemoteMessageProtocol
+import akka.remote.protocol.RemoteProtocol.MetadataEntryProtocol
 import akka.remote.{MessageSerializer, Pipeline}
+import com.google.protobuf.ByteString
 
 /**
  * Test for Ticket #597, tests for Pipeline
@@ -117,18 +119,42 @@ class PipelineTest extends WordSpec with ShouldMatchers with BeforeAndAfterAll w
     }
 
     "get the request passed through it and modify the message with Modify" in {
-      within(2 seconds) {
-        val filter = Modify(actorName)
-        Pipeline.registerClientFilters(Address(host, port), filter.filter)
-        filter.interceptedMessages should have size (0)
-        remote.actorFor(actorName, host, port) ! "test"
-        expectMsg("changed the message in the pipeline")
-        filter.interceptedMessages should have size (1)
-        filter.interceptedMessages map {
-          protocol => protocol.getActorInfo.getId should be(actorName)
-        }
+      val filter = Modify(echoName)
+      Pipeline.registerClientFilters(Address(host, port), filter.filter)
+      filter.interceptedMessages should have size (0)
+      val reply = remote.actorFor(echoName, host, port) !! "test"
+      reply match {
+        case Some(msg) => reply.get should be("changed the message in the pipeline")
+        case _ => fail("incorrect reply")
+      }
+      filter.interceptedMessages should have size (1)
+      filter.interceptedMessages map {
+        protocol => protocol.getActorInfo.getId should be(echoName)
       }
     }
+    "get the request passed through it and add header to the message with AddMetaData" in {
+      val addMetaData = AddMetaData(echoName, "key", "somedata")
+      val getMetaData = GetMetaData(echoName)
+
+      Pipeline.registerClientFilters(Address(host, port), addMetaData.filter)
+      Pipeline.registerServerFilters(Address(host, port),Pipeline.identity,getMetaData.filter)
+      addMetaData.interceptedMessages should have size (0)
+      getMetaData.interceptedMessages should have size (0)
+      val reply = remote.actorFor(echoName, host, port) !! "test"
+      reply match {
+        case Some(msg) => reply.get should be("test")
+        case _ => fail("incorrect reply")
+      }
+      addMetaData.interceptedMessages should have size (1)
+      getMetaData.interceptedMessages should have size (1)
+      addMetaData.interceptedMessages map {
+        protocol => protocol.getActorInfo.getId should be(echoName)
+      }
+      val header = getMetaData.header
+      header._1 should be("key")
+      header._2 should be("somedata")
+    }
+
   }
   "A registered client receive filter" should {
     "get the reply passed through it" in {
@@ -205,6 +231,38 @@ case class FilterByName(id: String) {
   }
 }
 
+case class AddMetaData(id: String, key: String, value: String) {
+  val messages = ListBuffer[RemoteMessageProtocol]()
+
+  def interceptedMessages: Seq[RemoteMessageProtocol] = messages
+
+  def filter: Pipeline.Filter = {
+    case Some(protocol: RemoteMessageProtocol) if protocol.getActorInfo.getId.equals(id) => {
+      messages.append(protocol)
+      val bytes = ByteString.copyFromUtf8(value)
+      val metadata = MetadataEntryProtocol.newBuilder.setKey(key).setValue(bytes).build
+      val newMessage = protocol.toBuilder.addMetadata(metadata).build
+      Some(newMessage)
+    }
+  }
+}
+
+case class GetMetaData(id: String) {
+  val messages = ListBuffer[RemoteMessageProtocol]()
+
+  def interceptedMessages: Seq[RemoteMessageProtocol] = messages
+
+  def header: (String, String) = (messages.last.getMetadata(0).getKey, messages.last.getMetadata(0).getValue.toStringUtf8())
+
+  def filter: Pipeline.Filter = {
+    case Some(protocol: RemoteMessageProtocol) if protocol.getActorInfo.getId.equals(id) => {
+      messages.append(protocol)
+      Some(protocol)
+    }
+  }
+}
+
+
 case class Modify(id: String) {
   val messages = ListBuffer[RemoteMessageProtocol]()
 
@@ -213,7 +271,6 @@ case class Modify(id: String) {
   def filter: Pipeline.Filter = {
     case Some(protocol: RemoteMessageProtocol) if protocol.getActorInfo.getId.equals(id) => {
       messages.append(protocol)
-
       val message = MessageSerializer.serialize(new String("changed the message in the pipeline"))
       Some(protocol.toBuilder.setMessage(message).build)
     }
