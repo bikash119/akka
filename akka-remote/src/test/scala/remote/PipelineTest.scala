@@ -16,6 +16,9 @@ import org.scalatest.{BeforeAndAfterAll, WordSpec}
 import akka.remote.protocol.RemoteProtocol.RemoteMessageProtocol
 import akka.remote.{MessageSerializer, Pipeline}
 
+/**
+ * Test for Ticket #597, tests for Pipeline
+ */
 class PipelineTest extends WordSpec with ShouldMatchers with BeforeAndAfterAll with TestKit with Logging {
   val remote = Actor.remote
   val host = "localhost"
@@ -149,7 +152,6 @@ class PipelineTest extends WordSpec with ShouldMatchers with BeforeAndAfterAll w
       }
     }
 
-
     "A registered server receive filter" should {
       val filter = PassThrough(echoName)
       "get the request passed through it" in {
@@ -229,7 +231,6 @@ case class Modify(id: String) {
     }
   }
 }
-
 
 case class PassThrough(id: String) {
   val messages = ListBuffer[RemoteMessageProtocol]()
