@@ -6,8 +6,6 @@ package akka.util
 import java.net.InetSocketAddress
 
 object Address {
-  // TODO add uri support
-  //def apply(uri:String) = new Address
   def apply(hostname: String, port: Int) = new Address(hostname, port)
   def apply(inetAddress: InetSocketAddress): Address = inetAddress match {
     case null => null
