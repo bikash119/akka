@@ -24,7 +24,6 @@ class PipelineTest extends WordSpec with ShouldMatchers with BeforeAndAfterAll w
   val host = "localhost"
   val port = 25520
   val timeoutTestActor = 50
-  val noMsgSecs = 2
   val actorName = "test-name"
   val anotherName = "under another name"
   val echoName = "echo"
@@ -51,145 +50,143 @@ class PipelineTest extends WordSpec with ShouldMatchers with BeforeAndAfterAll w
     stopTestActor
   }
 
-  within(10 seconds) {
-    "A registered client send filter" should {
-      "get the request passed through it with a PassThrough filter" in {
-        within(1 seconds) {
-          val filter = PassThrough(actorName)
-          Pipeline.registerClientFilters(Address(host, port), filter.filter)
-          filter.interceptedMessages should have size (0)
-          remote.actorFor(actorName, host, port) ! "test"
-          expectMsg("test")
-          filter.interceptedMessages should have size (1)
-          filter.interceptedMessages map {
-            protocol => protocol.getActorInfo.getId should be(actorName)
-          }
-        }
-      }
-    }
-    "A registered client send filter" should {
-      val filter = FilterByName(actorName)
-
-      "get the request passed through it and exclude the message with FilterByName" in {
-        within(500 millis) {
-          Pipeline.registerClientFilters(Address(host, port), filter.filter)
-          filter.interceptedMessages should have size (0)
-          remote.actorFor(actorName, host, port) ! "test"
-          expectNoMsg
-          filter.interceptedMessages should have size (1)
-          filter.interceptedMessages map {
-            protocol => protocol.getActorInfo.getId should be(actorName)
-          }
-        }
-      }
-      "not be active after another filter is set" in {
-        within(1 seconds) {
-          Pipeline.registerClientFilters(Address(host, port), Pipeline.identity)
-          remote.actorFor(actorName, host, port) ! "test"
-          expectMsg("test")
-          filter.interceptedMessages should have size (1)
-        }
-      }
-      "be active after the filter is set again" in {
-        within(500 millis) {
-          Pipeline.registerClientFilters(Address(host, port), filter.filter)
-          remote.actorFor(actorName, host, port) ! "test"
-          expectNoMsg
-          filter.interceptedMessages should have size (2)
-        }
-      }
-      "not be active after filters are unregistered" in {
-        within(1 seconds) {
-          Pipeline.unregisterClientFilters(Address(host, port))
-          remote.actorFor(actorName, host, port) ! "test"
-          expectMsg("test")
-          filter.interceptedMessages should have size (2)
-        }
-      }
-
-      "get the request passed through it without FilterByName" in {
-        within(1 seconds) {
-          val anotherFilter = FilterByName(anotherName)
-          Pipeline.registerClientFilters(Address(host, port), anotherFilter.filter)
-          anotherFilter.interceptedMessages should have size (0)
-          remote.actorFor(actorName, host, port) ! "test"
-          expectMsg("test")
-          anotherFilter.interceptedMessages should have size (0)
-        }
-      }
-
-      "get the request passed through it and modify the message with Modify" in {
-        within(1 seconds) {
-          val filter = Modify(actorName)
-          Pipeline.registerClientFilters(Address(host, port), filter.filter)
-          filter.interceptedMessages should have size (0)
-          remote.actorFor(actorName, host, port) ! "test"
-          expectMsg("changed the message in the pipeline")
-          filter.interceptedMessages should have size (1)
-          filter.interceptedMessages map {
-            protocol => protocol.getActorInfo.getId should be(actorName)
-          }
-        }
-      }
-    }
-    "A registered client receive filter" should {
-      "get the reply passed through it" in {
-        val filter = PassThrough(echoName)
-        Pipeline.registerClientFilters(Address(host, port), Pipeline.identity, filter.filter)
+  "A registered client send filter" should {
+    "get the request passed through it with a PassThrough filter" in {
+      within(2 seconds) {
+        val filter = PassThrough(actorName)
+        Pipeline.registerClientFilters(Address(host, port), filter.filter)
         filter.interceptedMessages should have size (0)
-        val reply = remote.actorFor(echoName, host, port) !! "test"
-        reply match {
-          case Some(msg) => reply.get should be("test")
-          case _ => fail("incorrect reply")
-        }
+        remote.actorFor(actorName, host, port) ! "test"
+        expectMsg("test")
         filter.interceptedMessages should have size (1)
         filter.interceptedMessages map {
-          protocol => protocol.getActorInfo.getId should be(echoName)
+          protocol => protocol.getActorInfo.getId should be(actorName)
         }
       }
     }
+  }
+  "A registered client send filter" should {
+    val filter = FilterByName(actorName)
+    val remoteActor = remote.actorFor(actorName, host, port)
+    "get the request passed through it and exclude the message with FilterByName" in {
+      within(2 seconds) {
+        Pipeline.registerClientFilters(Address(host, port), filter.filter)
+        filter.interceptedMessages should have size (0)
+        remoteActor ! "test"
+        expectNoMsg
+        filter.interceptedMessages should have size (1)
+        filter.interceptedMessages map {
+          protocol => protocol.getActorInfo.getId should be(actorName)
+        }
+      }
+    }
+    "not be active after another filter is set" in {
+      within(2 seconds) {
+        Pipeline.registerClientFilters(Address(host, port), Pipeline.identity)
+        remote.actorFor(actorName, host, port) ! "test"
+        expectMsg("test")
+        filter.interceptedMessages should have size (1)
+      }
+    }
+    "be active after the filter is set again" in {
+      within(2 seconds) {
+        Pipeline.registerClientFilters(Address(host, port), filter.filter)
+        remote.actorFor(actorName, host, port) ! "test"
+        expectNoMsg
+        filter.interceptedMessages should have size (2)
+      }
+    }
+    "not be active after filters are unregistered" in {
+      within(2 seconds) {
+        Pipeline.unregisterClientFilters(Address(host, port))
+        remote.actorFor(actorName, host, port) ! "test"
+        expectMsg("test")
+        filter.interceptedMessages should have size (2)
+      }
+    }
 
-    "A registered server receive filter" should {
+    "get the request passed through it without FilterByName" in {
+      within(2 seconds) {
+        val anotherFilter = FilterByName(anotherName)
+        Pipeline.registerClientFilters(Address(host, port), anotherFilter.filter)
+        anotherFilter.interceptedMessages should have size (0)
+        remote.actorFor(actorName, host, port) ! "test"
+        expectMsg("test")
+        anotherFilter.interceptedMessages should have size (0)
+      }
+    }
+
+    "get the request passed through it and modify the message with Modify" in {
+      within(2 seconds) {
+        val filter = Modify(actorName)
+        Pipeline.registerClientFilters(Address(host, port), filter.filter)
+        filter.interceptedMessages should have size (0)
+        remote.actorFor(actorName, host, port) ! "test"
+        expectMsg("changed the message in the pipeline")
+        filter.interceptedMessages should have size (1)
+        filter.interceptedMessages map {
+          protocol => protocol.getActorInfo.getId should be(actorName)
+        }
+      }
+    }
+  }
+  "A registered client receive filter" should {
+    "get the reply passed through it" in {
       val filter = PassThrough(echoName)
-      "get the request passed through it" in {
-        Pipeline.registerServerFilters(Address(host, port), Pipeline.identity, filter.filter)
-        filter.interceptedMessages should have size (0)
-        val reply = remote.actorFor(echoName, host, port) !! "test"
-        reply match {
-          case Some(msg) => reply.get should be("test")
-          case _ => fail("incorrect reply")
-        }
-        filter.interceptedMessages should have size (1)
-        filter.interceptedMessages map {
-          protocol => protocol.getActorInfo.getId should be(echoName)
-        }
+      Pipeline.registerClientFilters(Address(host, port), Pipeline.identity, filter.filter)
+      filter.interceptedMessages should have size (0)
+      val reply = remote.actorFor(echoName, host, port) !! "test"
+      reply match {
+        case Some(msg) => reply.get should be("test")
+        case _ => fail("incorrect reply")
       }
-      "get no request passed through it after unregister" in {
-        Pipeline.unregisterServerFilters(Address(host, port))
-        filter.interceptedMessages should have size (1)
-        val reply = remote.actorFor(echoName, host, port) !! "test"
-        reply match {
-          case Some(msg) => reply.get should be("test")
-          case _ => fail("incorrect reply")
-        }
-        filter.interceptedMessages should have size (1)
+      filter.interceptedMessages should have size (1)
+      filter.interceptedMessages map {
+        protocol => protocol.getActorInfo.getId should be(echoName)
       }
     }
+  }
 
-    "A registered server send filter" should {
-      "get the reply passed through it" in {
-        val filter = PassThrough(echoName)
-        Pipeline.registerServerFilters(Address(host, port), filter.filter, Pipeline.identity)
-        filter.interceptedMessages should have size (0)
-        val reply = remote.actorFor(echoName, host, port) !! "test"
-        reply match {
-          case Some(msg) => reply.get should be("test")
-          case _ => fail("incorrect reply")
-        }
-        filter.interceptedMessages should have size (1)
-        filter.interceptedMessages map {
-          protocol => protocol.getActorInfo.getId should be(echoName)
-        }
+  "A registered server receive filter" should {
+    val filter = PassThrough(echoName)
+    "get the request passed through it" in {
+      Pipeline.registerServerFilters(Address(host, port), Pipeline.identity, filter.filter)
+      filter.interceptedMessages should have size (0)
+      val reply = remote.actorFor(echoName, host, port) !! "test"
+      reply match {
+        case Some(msg) => reply.get should be("test")
+        case _ => fail("incorrect reply")
+      }
+      filter.interceptedMessages should have size (1)
+      filter.interceptedMessages map {
+        protocol => protocol.getActorInfo.getId should be(echoName)
+      }
+    }
+    "get no request passed through it after unregister" in {
+      Pipeline.unregisterServerFilters(Address(host, port))
+      filter.interceptedMessages should have size (1)
+      val reply = remote.actorFor(echoName, host, port) !! "test"
+      reply match {
+        case Some(msg) => reply.get should be("test")
+        case _ => fail("incorrect reply")
+      }
+      filter.interceptedMessages should have size (1)
+    }
+  }
+
+  "A registered server send filter" should {
+    "get the reply passed through it" in {
+      val filter = PassThrough(echoName)
+      Pipeline.registerServerFilters(Address(host, port), filter.filter, Pipeline.identity)
+      filter.interceptedMessages should have size (0)
+      val reply = remote.actorFor(echoName, host, port) !! "test"
+      reply match {
+        case Some(msg) => reply.get should be("test")
+        case _ => fail("incorrect reply")
+      }
+      filter.interceptedMessages should have size (1)
+      filter.interceptedMessages map {
+        protocol => protocol.getActorInfo.getId should be(echoName)
       }
     }
   }

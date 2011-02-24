@@ -384,6 +384,7 @@ trait RemoteServerModule extends RemoteModule {
 }
 
 trait RemoteClientModule extends RemoteModule { self: RemoteModule =>
+
   def actorFor(classNameOrServiceId: String, hostname: String, port: Int): ActorRef =
     actorFor(classNameOrServiceId, classNameOrServiceId, Actor.TIMEOUT, hostname, port, None)
 

@@ -21,9 +21,6 @@ trait Client {
 
   def shutdown: Boolean
 
-  /**
-   * Converts the message to the wireprotocol and sends the message across the wire
-   */
   def send[T](
                  message: Any,
                  senderOption: Option[ActorRef],
@@ -41,9 +38,9 @@ trait Client {
 
   protected[akka] def registerFilters(sendFilter: Pipeline.Filter, receiveFilter: Pipeline.Filter): Unit
 
-  protected[akka] def unregisterFilters(): Unit
+  protected[akka] def unregisterFilters
 
-  protected def notifyListeners(msg: => Any);
+  protected def notifyListeners(msg: => Any)
 
   protected[akka] def registerSupervisorForActor(actorRef: ActorRef): ActorRef
 
@@ -328,6 +325,6 @@ trait DefaultRemoteClientModule extends RemoteClientModule with ClientFilters {
   }
 
   private[akka] def unregisterClientFilters(remoteAddress: Address, loader: Option[ClassLoader] = None): Unit = {
-    withClientFor(new InetSocketAddress(remoteAddress.hostname, remoteAddress.port), loader)(_.unregisterFilters())
+    withClientFor(new InetSocketAddress(remoteAddress.hostname, remoteAddress.port), loader)(_.unregisterFilters)
   }
 }
